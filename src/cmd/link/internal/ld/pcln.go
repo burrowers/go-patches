@@ -249,6 +249,19 @@ func (state *pclntab) generatePCHeader(ctxt *Link) {
 		if off != size {
 			panic(fmt.Sprintf("pcHeader size: %d != %d", off, size))
 		}
+
+		// Use garble prefix in variable names to minimize collision risk
+		garbleMagicStr := os.Getenv("GARBLE_LINKER_MAGIC")
+		if garbleMagicStr == "" {
+			panic("[garble] magic value must be set")
+		}
+		var garbleMagicVal uint32
+		// Use fmt package instead of strconv to avoid importing a new package
+		if _, err := fmt.Sscan(garbleMagicStr, &garbleMagicVal); err != nil {
+			panic(fmt.Errorf("[garble] invalid magic value %s: %v", garbleMagicStr, err))
+		}
+
+		header.SetUint32(ctxt.Arch, 0, garbleMagicVal)
 	}
 
 	state.pcheader = state.addGeneratedSym(ctxt, "runtime.pcheader", size, writeHeader)
