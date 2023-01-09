@@ -4,6 +4,8 @@
 
 package ld
 
+import "unicode"
+
 import (
 	"cmd/internal/goobj"
 	"cmd/internal/objabi"
@@ -321,10 +323,19 @@ func (state *pclntab) generateFuncnametab(ctxt *Link, funcs []loader.Sym) map[lo
 		return name[:i], "[...]", name[j+1:]
 	}
 
+	garbleTiny := os.Getenv("GARBLE_LINK_TINY") == "true"
+
 	// Write the null terminated strings.
 	writeFuncNameTab := func(ctxt *Link, s loader.Sym) {
 		symtab := ctxt.loader.MakeSymbolUpdater(s)
+		if garbleTiny {
+			symtab.AddStringAt(0, "")
+		}
+
 		for s, off := range nameOffsets {
+			if garbleTiny && off == 0 {
+				continue
+			}
 			a, b, c := nameParts(ctxt.loader.SymName(s))
 			o := int64(off)
 			o = symtab.AddStringAt(o, a)
@@ -335,9 +346,26 @@ func (state *pclntab) generateFuncnametab(ctxt *Link, funcs []loader.Sym) map[lo
 
 	// Loop through the CUs, and calculate the size needed.
 	var size int64
+
+	if garbleTiny {
+		size = 1 // first byte is reserved for empty string used for all non-exportable method names
+	}
+	isExported := func(name string) bool {
+		for _, r := range name[strings.LastIndexByte(name, '.')+1:] {
+			return unicode.IsUpper(r)
+		}
+		return false
+	}
+
 	walkFuncs(ctxt, funcs, func(s loader.Sym) {
-		nameOffsets[s] = uint32(size)
 		a, b, c := nameParts(ctxt.loader.SymName(s))
+
+		if garbleTiny && !isExported(a) {
+			nameOffsets[s] = 0 // redirect name to empty string
+			return
+		}
+
+		nameOffsets[s] = uint32(size)
 		size += int64(len(a) + len(b) + len(c) + 1) // NULL terminate
 	})
 
