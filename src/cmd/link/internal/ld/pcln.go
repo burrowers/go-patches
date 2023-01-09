@@ -5,6 +5,10 @@
 package ld
 
 import (
+	"unicode"
+)
+
+import (
 	"cmd/internal/goobj"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
@@ -315,19 +319,56 @@ func walkFuncs(ctxt *Link, funcs []loader.Sym, f func(loader.Sym)) {
 func (state *pclntab) generateFuncnametab(ctxt *Link, funcs []loader.Sym) map[loader.Sym]uint32 {
 	nameOffsets := make(map[loader.Sym]uint32, state.nfunc)
 
+	garbleTiny := os.Getenv("GARBLE_LINK_TINY") == "true"
+
 	// Write the null terminated strings.
 	writeFuncNameTab := func(ctxt *Link, s loader.Sym) {
 		symtab := ctxt.loader.MakeSymbolUpdater(s)
+		if garbleTiny {
+			symtab.AddStringAt(0, "")
+		}
+
 		for s, off := range nameOffsets {
+			if garbleTiny && off == 0 {
+				continue
+			}
 			symtab.AddCStringAt(int64(off), ctxt.loader.SymName(s))
 		}
 	}
 
 	// Loop through the CUs, and calculate the size needed.
 	var size int64
+
+	if garbleTiny {
+		size = 1 // first byte is reserved for empty string used for all non-exportable method names
+	}
+	// Kinds of SymNames found in the wild:
+	//
+	// * reflect.Value.CanAddr
+	// * reflect.(*Value).String
+	// * reflect.w6cEoKc
+	// * internal/abi.(*RegArgs).IntRegArgAddr
+	// * type:.eq.runtime.special
+	// * runtime/internal/atomic.(*Pointer[go.shape.string]).Store
+	//
+	// Checking whether the first rune after the last dot is uppercase seems enough.
+	isExported := func(name string) bool {
+		for _, r := range name[strings.LastIndexByte(name, '.')+1:] {
+			return unicode.IsUpper(r)
+		}
+		return false
+	}
+
 	walkFuncs(ctxt, funcs, func(s loader.Sym) {
+		name := ctxt.loader.SymName(s)
+
+		if garbleTiny && !isExported(name) {
+			nameOffsets[s] = 0 // redirect name to empty string
+			return
+		}
+
 		nameOffsets[s] = uint32(size)
-		size += int64(len(ctxt.loader.SymName(s)) + 1) // NULL terminate
+		size += int64(len(name) + 1) // NULL terminate
 	})
 
 	state.funcnametab = state.addGeneratedSym(ctxt, "runtime.funcnametab", size, writeFuncNameTab)
