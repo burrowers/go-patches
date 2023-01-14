@@ -803,6 +803,26 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 			sb.SetUint32(ctxt.Arch, dataoff, uint32(ldr.SymValue(fdsym)-gofuncBase))
 		}
 	}
+
+	// Moving next code higher is not recommended.
+	// Only at the end of the current function no edits between go versions
+	garbleEntryOffKeyStr := os.Getenv("GARBLE_LINK_ENTRYOFF_KEY")
+	if garbleEntryOffKeyStr == "" {
+		panic("[garble] entryOff key must be set")
+	}
+	var garbleEntryOffKey uint32
+	// Use fmt package instead of strconv to avoid importing a new package
+	if _, err := fmt.Sscan(garbleEntryOffKeyStr, &garbleEntryOffKey); err != nil {
+		panic(fmt.Errorf("[garble] invalid entryOff key %s: %v", garbleEntryOffKeyStr, err))
+	}
+
+	garbleData := sb.Data()
+	for _, off := range startLocations {
+		entryOff := ctxt.Arch.ByteOrder.Uint32(garbleData[off:])
+		nameOff := ctxt.Arch.ByteOrder.Uint32(garbleData[off+4:])
+
+		sb.SetUint32(ctxt.Arch, int64(off), entryOff^(nameOff*garbleEntryOffKey))
+	}
 }
 
 // pclntab initializes the pclntab symbol with
