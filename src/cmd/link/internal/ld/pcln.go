@@ -5,6 +5,14 @@
 package ld
 
 import (
+	"os"
+)
+
+import (
+	"unicode"
+)
+
+import (
 	"cmd/internal/goobj"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
@@ -282,6 +290,19 @@ func (state *pclntab) generatePCHeader(ctxt *Link) {
 		if off != size {
 			panic(fmt.Sprintf("pcHeader size: %d != %d", off, size))
 		}
+
+		// Use garble prefix in variable names to minimize collision risk
+		garbleMagicStr := os.Getenv("GARBLE_LINK_MAGIC")
+		if garbleMagicStr == "" {
+			panic("[garble] magic value must be set")
+		}
+		var garbleMagicVal uint32
+		// Use fmt package instead of strconv to avoid importing a new package
+		if _, err := fmt.Sscan(garbleMagicStr, &garbleMagicVal); err != nil {
+			panic(fmt.Errorf("[garble] invalid magic value %s: %v", garbleMagicStr, err))
+		}
+
+		header.SetUint32(ctxt.Arch, 0, garbleMagicVal)
 	}
 
 	state.pcheader = state.addGeneratedSym(ctxt, "runtime.pcheader", size, int32(ctxt.Arch.PtrSize), writeHeader)
@@ -318,19 +339,56 @@ func walkFuncs(ctxt *Link, funcs []loader.Sym, f func(loader.Sym)) {
 func (state *pclntab) generateFuncnametab(ctxt *Link, funcs []loader.Sym) map[loader.Sym]uint32 {
 	nameOffsets := make(map[loader.Sym]uint32, state.nfunc)
 
+	garbleTiny := os.Getenv("GARBLE_LINK_TINY") == "true"
+
 	// Write the null terminated strings.
 	writeFuncNameTab := func(ctxt *Link, s loader.Sym) {
 		symtab := ctxt.loader.MakeSymbolUpdater(s)
+		if garbleTiny {
+			symtab.AddStringAt(0, "")
+		}
+
 		for s, off := range nameOffsets {
+			if garbleTiny && off == 0 {
+				continue
+			}
 			symtab.AddCStringAt(int64(off), ctxt.loader.SymName(s))
 		}
 	}
 
 	// Loop through the CUs, and calculate the size needed.
 	var size int64
+
+	if garbleTiny {
+		size = 1 // first byte is reserved for empty string used for all non-exportable method names
+	}
+	// Kinds of SymNames found in the wild:
+	//
+	// * reflect.Value.CanAddr
+	// * reflect.(*Value).String
+	// * reflect.w6cEoKc
+	// * internal/abi.(*RegArgs).IntRegArgAddr
+	// * type:.eq.runtime.special
+	// * runtime/internal/atomic.(*Pointer[go.shape.string]).Store
+	//
+	// Checking whether the first rune after the last dot is uppercase seems enough.
+	isExported := func(name string) bool {
+		for _, r := range name[strings.LastIndexByte(name, '.')+1:] {
+			return unicode.IsUpper(r)
+		}
+		return false
+	}
+
 	walkFuncs(ctxt, funcs, func(s loader.Sym) {
+		name := ctxt.loader.SymName(s)
+
+		if garbleTiny && !isExported(name) {
+			nameOffsets[s] = 0 // redirect name to empty string
+			return
+		}
+
 		nameOffsets[s] = uint32(size)
-		size += int64(len(ctxt.loader.SymName(s)) + 1) // NULL terminate
+		size += int64(len(name) + 1) // NULL terminate
 	})
 
 	state.funcnametab = state.addGeneratedSym(ctxt, "runtime.funcnametab", size, 1, writeFuncNameTab)
@@ -921,6 +979,26 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 
 			sb.SetUint32(ctxt.Arch, dataoff, uint32(ldr.SymValue(fdsym)))
 		}
+	}
+
+	// Moving next code higher is not recommended.
+	// Only at the end of the current function no edits between go versions
+	garbleEntryOffKeyStr := os.Getenv("GARBLE_LINK_ENTRYOFF_KEY")
+	if garbleEntryOffKeyStr == "" {
+		panic("[garble] entryOff key must be set")
+	}
+	var garbleEntryOffKey uint32
+	// Use fmt package instead of strconv to avoid importing a new package
+	if _, err := fmt.Sscan(garbleEntryOffKeyStr, &garbleEntryOffKey); err != nil {
+		panic(fmt.Errorf("[garble] invalid entryOff key %s: %v", garbleEntryOffKeyStr, err))
+	}
+
+	garbleData := sb.Data()
+	for _, off := range startLocations {
+		entryOff := ctxt.Arch.ByteOrder.Uint32(garbleData[off:])
+		nameOff := ctxt.Arch.ByteOrder.Uint32(garbleData[off+4:])
+
+		sb.SetUint32(ctxt.Arch, int64(off), entryOff^(nameOff*garbleEntryOffKey))
 	}
 }
 
